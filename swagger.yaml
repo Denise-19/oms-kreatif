@@ -1,0 +1,750 @@
+openapi: 3.0.3
+info:
+  title: OMS Kreatif API
+  description: |
+    API dokumentasi untuk Order Management System (OMS) Kreatif.
+    Mendukung agregasi produk dari public API eksternal, order lifecycle management,
+    payment handling asynchronous, dan shipping integration.
+  version: "1.0.0"
+  contact:
+    name: OMS Kreatif Team
+
+servers:
+  - url: http://localhost:8000/api
+    description: Local development server
+
+tags:
+  - name: Products
+    description: Product aggregation dari public API eksternal
+  - name: Orders
+    description: Order lifecycle management
+  - name: Payments
+    description: Payment handling dan webhook
+  - name: Shipping
+    description: Shipping & mock checkout
+
+paths:
+  /products:
+    get:
+      tags: [Products]
+      summary: Get all products
+      description: Mengambil daftar produk dari FakeStore API dan DummyJSON API. Hasil di-cache 10 menit.
+      responses:
+        '200':
+          description: Daftar produk berhasil diambil
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductListResponse'
+              example:
+                success: true
+                total: 40
+                data:
+                  - external_id: "1"
+                    source: "fakestore"
+                    name: "Fjallraven - Foldsack No. 1 Backpack"
+                    price: 109.95
+                    description: "Your perfect pack for everyday use."
+                    category: "men's clothing"
+                  - external_id: "1"
+                    source: "dummyjson"
+                    name: "Essence Mascara Lash Princess"
+                    price: 9.99
+                    description: "The Essence Mascara Lash Princess..."
+                    category: "beauty"
+
+  /orders:
+    post:
+      tags: [Orders]
+      summary: Create order
+      description: Membuat order baru. Mendukung idempotency key untuk mencegah double order.
+      parameters:
+        - name: X-Idempotency-Key
+          in: header
+          required: false
+          description: UUID unik untuk mencegah duplikasi order
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrderRequest'
+            example:
+              user_id: 1
+              items:
+                - product_id: "1"
+                  source_api: "fakestore"
+                  quantity: 2
+              shipping:
+                courier: "jne"
+                service: "REG"
+                origin: "Jakarta"
+                destination: "Bandung"
+                weight: 1000
+      responses:
+        '201':
+          description: Order berhasil dibuat
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                success: true
+                message: "Order created successfully."
+                data:
+                  id: 1
+                  order_number: "ORD-ABCD-20260910"
+                  status: "created"
+                  status_label: "Created"
+                  subtotal: 219.90
+                  shipping_cost: 10000.00
+                  total: 10219.90
+                  idempotency_key: "550e8400-e29b-41d4-a716-446655440000"
+                  created_at: "2026-09-10T08:00:00+00:00"
+        '422':
+          description: Stok tidak cukup
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                message: "Stok produk 'Fjallraven Backpack' tidak mencukupi. Tersedia: 0, diminta: 2."
+        '502':
+          description: Produk tidak ditemukan di API eksternal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                message: "Produk dengan ID '999' dari sumber 'fakestore' tidak ditemukan."
+
+  /orders/{order}/pay:
+    post:
+      tags: [Payments]
+      summary: Initiate payment
+      description: |
+        Menginisiasi pembayaran untuk order. Otomatis transisi `created` → `pending_payment`.
+        Idempotent — memanggil dua kali selama payment masih `pending` mengembalikan payment yang sama.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                provider:
+                  type: string
+                  default: mock_gateway
+            example:
+              provider: "mock_gateway"
+      responses:
+        '200':
+          description: Payment berhasil diinisiasi
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+              example:
+                success: true
+                message: "Payment request initiated successfully"
+                data:
+                  payment_id: 1
+                  order_id: 1
+                  order_number: "ORD-ABCD-20260910"
+                  provider: "mock_gateway"
+                  status: "pending"
+                  amount: 10219.90
+                  external_reference: "PAY-ORD-ABCD-20260910-XYZ123"
+                  checkout_url: "http://localhost:8000/api/mock-checkout/PAY-ORD-ABCD-20260910-XYZ123"
+        '422':
+          description: Order tidak bisa dibayar
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                message: "Order dengan status 'completed' tidak dapat diproses pembayarannya."
+
+  /webhooks/payment:
+    post:
+      tags: [Payments]
+      summary: Payment webhook
+      description: |
+        Menerima callback dari payment gateway secara asynchronous.
+        Job langsung di-queue dan diproses oleh worker.
+        Queue worker harus berjalan agar status order berubah.
+
+        Setelah webhook `success` diproses worker, order otomatis transisi
+        `pending_payment` → `paid` → `processing` (via listener).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentWebhookRequest'
+            examples:
+              success:
+                summary: Payment sukses
+                value:
+                  external_reference: "PAY-ORD-ABCD-20260910-XYZ123"
+                  status: "success"
+                  transaction_id: "TXN-001"
+                  amount: 10219.90
+              failed:
+                summary: Payment gagal
+                value:
+                  external_reference: "PAY-ORD-ABCD-20260910-XYZ123"
+                  status: "failed"
+                  reason: "Insufficient funds"
+      responses:
+        '200':
+          description: Webhook diterima dan di-queue
+          content:
+            application/json:
+              example:
+                success: true
+                message: "Webhook received and queued for asynchronous processing"
+        '422':
+          description: Validasi gagal
+          content:
+            application/json:
+              example:
+                message: "The status field must be one of success, failed."
+                errors:
+                  status: ["The status field must be one of success, failed."]
+
+  /orders/{order}/process:
+    post:
+      tags: [Orders]
+      summary: Process order
+      description: Transisi manual `paid` → `processing`.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+            example:
+              reason: "Warehouse picked up the order"
+      responses:
+        '200':
+          description: Order berhasil ditransisi ke Processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                success: true
+                message: "Order transitioned to Processing."
+                data:
+                  id: 1
+                  order_number: "ORD-ABCD-20260910"
+                  status: "processing"
+                  status_label: "Processing"
+                  subtotal: 219.90
+                  shipping_cost: 10000.00
+                  total: 10219.90
+                  idempotency_key: "550e8400-e29b-41d4-a716-446655440000"
+                  created_at: "2026-09-10T08:00:00+00:00"
+        '422':
+          description: Transisi tidak valid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                message: "Tidak dapat mengubah status order dari 'created' ke 'processing'."
+
+  /orders/{order}/ship:
+    post:
+      tags: [Orders]
+      summary: Ship order
+      description: Transisi `processing` → `shipped`. Opsional menyertakan nomor resi.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tracking_number:
+                  type: string
+                reason:
+                  type: string
+            example:
+              tracking_number: "JNE-1234567890"
+              reason: "Package handed to courier"
+      responses:
+        '200':
+          description: Order berhasil ditransisi ke Shipped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                success: true
+                message: "Order transitioned to Shipped."
+                data:
+                  id: 1
+                  order_number: "ORD-ABCD-20260910"
+                  status: "shipped"
+                  status_label: "Shipped"
+                  subtotal: 219.90
+                  shipping_cost: 10000.00
+                  total: 10219.90
+                  idempotency_key: "550e8400-e29b-41d4-a716-446655440000"
+                  created_at: "2026-09-10T08:00:00+00:00"
+
+  /orders/{order}/complete:
+    post:
+      tags: [Orders]
+      summary: Complete order
+      description: Transisi `shipped` → `completed`. Status terminal — tidak bisa diubah lagi.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+            example:
+              reason: "Customer confirmed delivery"
+      responses:
+        '200':
+          description: Order berhasil ditransisi ke Completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                success: true
+                message: "Order transitioned to Completed."
+                data:
+                  id: 1
+                  order_number: "ORD-ABCD-20260910"
+                  status: "completed"
+                  status_label: "Completed"
+                  subtotal: 219.90
+                  shipping_cost: 10000.00
+                  total: 10219.90
+                  idempotency_key: "550e8400-e29b-41d4-a716-446655440000"
+                  created_at: "2026-09-10T08:00:00+00:00"
+
+  /orders/{order}/cancel:
+    post:
+      tags: [Orders]
+      summary: Cancel order
+      description: |
+        Membatalkan order. Stok otomatis dikembalikan.
+        Bisa dilakukan dari status `created`, `pending_payment`, `paid`, atau `processing`.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+            example:
+              reason: "Customer requested cancellation"
+      responses:
+        '200':
+          description: Order berhasil dibatalkan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                success: true
+                message: "Order cancelled successfully."
+                data:
+                  id: 1
+                  order_number: "ORD-ABCD-20260910"
+                  status: "cancelled"
+                  status_label: "Cancelled"
+                  subtotal: 219.90
+                  shipping_cost: 10000.00
+                  total: 10219.90
+                  idempotency_key: "550e8400-e29b-41d4-a716-446655440000"
+                  created_at: "2026-09-10T08:00:00+00:00"
+        '409':
+          description: Order sudah dibatalkan sebelumnya
+          content:
+            application/json:
+              example:
+                message: "Order already cancelled."
+        '422':
+          description: Order tidak bisa dibatalkan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                success: false
+                message: "Tidak dapat mengubah status order dari 'completed' ke 'cancelled'."
+
+  /orders/{order}/status-history:
+    get:
+      tags: [Orders]
+      summary: Get order status history
+      description: Mengembalikan riwayat lengkap semua transisi status sebuah order, diurutkan dari yang paling lama.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Riwayat status order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusHistoryResponse'
+              example:
+                success: true
+                data:
+                  - id: 1
+                    order_id: 1
+                    old_status: "created"
+                    new_status: "pending_payment"
+                    reason: "Payment initiated"
+                    created_at: "2026-09-10T08:01:00+00:00"
+                  - id: 2
+                    order_id: 1
+                    old_status: "pending_payment"
+                    new_status: "paid"
+                    reason: "Payment completed via webhook callback"
+                    created_at: "2026-09-10T08:02:00+00:00"
+                  - id: 3
+                    order_id: 1
+                    old_status: "paid"
+                    new_status: "processing"
+                    reason: "Auto-transitioned to processing after successful payment"
+                    created_at: "2026-09-10T08:02:01+00:00"
+
+  /mock-checkout/{reference}:
+    get:
+      tags: [Shipping]
+      summary: Mock checkout page
+      description: Halaman simulasi payment gateway untuk keperluan development dan testing. Menampilkan detail payment beserta contoh payload webhook yang siap dipakai.
+      parameters:
+        - name: reference
+          in: path
+          required: true
+          description: External reference dari Initiate Payment
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Detail mock checkout
+          content:
+            application/json:
+              example:
+                success: true
+                message: "Mock checkout page. Use the webhook_example to simulate payment completion."
+                data:
+                  external_reference: "PAY-ORD-ABCD-20260910-XYZ123"
+                  provider: "mock_gateway"
+                  status: "pending"
+                  amount: 10219.90
+                  order_number: "ORD-ABCD-20260910"
+                  order_status: "pending_payment"
+                webhook_example:
+                  url: "http://localhost:8000/api/webhooks/payment"
+                  method: "POST"
+                  payload_success:
+                    external_reference: "PAY-ORD-ABCD-20260910-XYZ123"
+                    status: "success"
+                    transaction_id: "TXN-ABCD1234"
+                    amount: 10219.90
+                  payload_failed:
+                    external_reference: "PAY-ORD-ABCD-20260910-XYZ123"
+                    status: "failed"
+                    reason: "Insufficient funds"
+        '404':
+          description: Reference tidak ditemukan
+          content:
+            application/json:
+              example:
+                success: false
+                message: "Payment with reference 'PAY-INVALID' not found."
+
+components:
+  parameters:
+    OrderId:
+      name: order
+      in: path
+      required: true
+      description: ID order
+      schema:
+        type: integer
+        example: 1
+
+  schemas:
+    Product:
+      type: object
+      properties:
+        external_id:
+          type: string
+          example: "1"
+        source:
+          type: string
+          enum: [fakestore, dummyjson]
+          example: "fakestore"
+        name:
+          type: string
+          example: "Fjallraven - Foldsack No. 1 Backpack"
+        price:
+          type: number
+          format: float
+          example: 109.95
+        description:
+          type: string
+        category:
+          type: string
+          example: "men's clothing"
+
+    ProductListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        total:
+          type: integer
+          example: 40
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Product'
+
+    OrderItemInput:
+      type: object
+      required: [product_id, source_api, quantity]
+      properties:
+        product_id:
+          type: string
+          description: "`external_id` dari Get Products"
+          example: "1"
+        source_api:
+          type: string
+          enum: [fakestore, dummyjson]
+          example: "fakestore"
+        quantity:
+          type: integer
+          minimum: 1
+          example: 2
+
+    ShippingInput:
+      type: object
+      required: [courier, service]
+      properties:
+        courier:
+          type: string
+          enum: [jne, tiki, pos]
+          example: "jne"
+        service:
+          type: string
+          enum: [REG, OKE, YES]
+          example: "REG"
+        origin:
+          type: string
+          default: "Jakarta"
+          example: "Jakarta"
+        destination:
+          type: string
+          default: "Bandung"
+          example: "Bandung"
+        weight:
+          type: integer
+          description: Berat dalam gram
+          default: 1000
+          example: 1000
+
+    CreateOrderRequest:
+      type: object
+      required: [items, shipping]
+      properties:
+        user_id:
+          type: integer
+          nullable: true
+          description: ID user pemesan
+          example: 1
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItemInput'
+        shipping:
+          $ref: '#/components/schemas/ShippingInput'
+
+    OrderData:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 1
+        order_number:
+          type: string
+          example: "ORD-ABCD-20260910"
+        status:
+          type: string
+          enum: [created, pending_payment, paid, processing, shipped, completed, failed, cancelled]
+          example: "created"
+        status_label:
+          type: string
+          example: "Created"
+        subtotal:
+          type: number
+          format: float
+          example: 219.90
+        shipping_cost:
+          type: number
+          format: float
+          example: 10000.00
+        total:
+          type: number
+          format: float
+          example: 10219.90
+        idempotency_key:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    OrderResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/OrderData'
+
+    PaymentData:
+      type: object
+      properties:
+        payment_id:
+          type: integer
+          example: 1
+        order_id:
+          type: integer
+          example: 1
+        order_number:
+          type: string
+          example: "ORD-ABCD-20260910"
+        provider:
+          type: string
+          example: "mock_gateway"
+        status:
+          type: string
+          enum: [pending, success, failed]
+          example: "pending"
+        amount:
+          type: number
+          format: float
+          example: 10219.90
+        external_reference:
+          type: string
+          example: "PAY-ORD-ABCD-20260910-XYZ123"
+        checkout_url:
+          type: string
+          format: uri
+
+    PaymentResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/PaymentData'
+
+    PaymentWebhookRequest:
+      type: object
+      required: [external_reference, status]
+      properties:
+        external_reference:
+          type: string
+          description: Reference dari Initiate Payment
+          example: "PAY-ORD-ABCD-20260910-XYZ123"
+        status:
+          type: string
+          enum: [success, failed]
+          example: "success"
+        transaction_id:
+          type: string
+          nullable: true
+          example: "TXN-001"
+        amount:
+          type: number
+          format: float
+          nullable: true
+          example: 10219.90
+        reason:
+          type: string
+          nullable: true
+          description: Alasan gagal (jika status = failed)
+
+    StatusHistoryItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        order_id:
+          type: integer
+        old_status:
+          type: string
+        new_status:
+          type: string
+        reason:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    StatusHistoryResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatusHistoryItem'
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
