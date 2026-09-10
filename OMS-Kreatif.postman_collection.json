@@ -1,0 +1,409 @@
+{
+  "info": {
+    "name": "OMS Kreatif",
+    "_postman_id": "oms-kreatif-collection",
+    "description": "Order Management System – complete API collection.\n\n**Quick start**\n1. Set the `base_url` variable to your app URL (default: `http://localhost:8000`).\n2. Call **Get Products** to browse available products.\n3. Call **Create Order** and copy the returned `order.id` into the `order_id` variable.\n4. Call **Initiate Payment** and copy `external_reference` into `payment_ref`.\n5. Call **Mock Checkout** to preview the ready-made webhook payloads.\n6. Call **Payment Webhook – Success** (or Failure) to simulate the gateway callback.\n7. Follow the lifecycle: Process → Ship → Complete (or Cancel at any point).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string",
+      "description": "Base URL of the Laravel application"
+    },
+    {
+      "key": "order_id",
+      "value": "",
+      "type": "string",
+      "description": "Set this after creating an order"
+    },
+    {
+      "key": "payment_ref",
+      "value": "",
+      "type": "string",
+      "description": "Set this after initiating payment (external_reference)"
+    }
+  ],
+  "item": [
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "Get Products",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/products",
+              "host": ["{{base_url}}"],
+              "path": ["api", "products"]
+            },
+            "description": "Fetches and merges products from FakeStore API and DummyJSON API. Results are cached for 10 minutes.\n\nUse `external_id` and `source` from the response when building the Create Order payload."
+          },
+          "response": [
+            {
+              "name": "200 OK – merged product list",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"total\": 40,\n  \"data\": [\n    {\n      \"external_id\": \"1\",\n      \"source\": \"fakestore\",\n      \"name\": \"Fjallraven - Foldsack No. 1 Backpack\",\n      \"price\": 109.95,\n      \"description\": \"Your perfect pack for everyday use.\",\n      \"category\": \"men's clothing\"\n    }\n  ]\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        {
+          "name": "Create Order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.success && json.data && json.data.id) {",
+                  "    pm.collectionVariables.set('order_id', json.data.id);",
+                  "    console.log('order_id set to', json.data.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Idempotency-Key", "value": "{{$guid}}", "description": "Optional – re-sending with the same key returns the existing order" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": 1,\n  \"items\": [\n    {\n      \"product_id\": \"1\",\n      \"source_api\": \"fakestore\",\n      \"quantity\": 2\n    }\n  ],\n  \"shipping\": {\n    \"courier\": \"jne\",\n    \"service\": \"REG\",\n    \"origin\": \"Jakarta\",\n      \"destination\": \"Bandung\",\n    \"weight\": 1000\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/orders",
+              "host": ["{{base_url}}"],
+              "path": ["api", "orders"]
+            },
+            "description": "Creates a new order.\n\n- `items[].product_id` – the `external_id` value from Get Products\n- `items[].source_api` – `fakestore` or `dummyjson`\n- `items[].quantity` – must be ≥ 1\n- `shipping.courier` – `jne`, `tiki`, or `pos`\n- `shipping.service` – `REG`, `OKE`, `YES`\n- `shipping.weight` – weight in grams\n\nIf `RAJAONGKIR_API_KEY` is not set the shipping cost is calculated with the built-in fallback formula.\n\n**Idempotency:** Send the same `X-Idempotency-Key` header to safely retry without creating duplicates."
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "status": "Created",
+              "code": 201,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Order created successfully.\",\n  \"data\": {\n    \"id\": 1,\n    \"order_number\": \"ORD-ABCD-20260910\",\n    \"status\": \"created\",\n    \"status_label\": \"Created\",\n    \"subtotal\": 219.90,\n    \"shipping_cost\": 10000.00,\n    \"total\": 10219.90,\n    \"idempotency_key\": \"some-uuid\",\n    \"created_at\": \"2026-09-10T08:00:00+00:00\"\n  }\n}"
+            },
+            {
+              "name": "422 Insufficient Stock",
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Stok produk 'Fjallraven Backpack' tidak mencukupi. Tersedia: 0, diminta: 2.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get Order Status History",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/orders/{{order_id}}/status-history",
+              "host": ["{{base_url}}"],
+              "path": ["api", "orders", "{{order_id}}", "status-history"]
+            },
+            "description": "Returns the full audit trail of status transitions for an order, ordered chronologically."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"data\": [\n    {\n      \"id\": 1,\n      \"order_id\": 1,\n      \"old_status\": \"created\",\n      \"new_status\": \"pending_payment\",\n      \"reason\": \"Payment initiated\",\n      \"created_at\": \"2026-09-10T08:01:00+00:00\"\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Cancel Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Customer requested cancellation\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/orders/{{order_id}}/cancel",
+              "host": ["{{base_url}}"],
+              "path": ["api", "orders", "{{order_id}}", "cancel"]
+            },
+            "description": "Cancels an order. Allowed from: `created`, `pending_payment`, `paid`, `processing`.\n\nStock is automatically restored on cancellation."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Order cancelled successfully.\",\n  \"data\": { \"id\": 1, \"status\": \"cancelled\", \"status_label\": \"Cancelled\" }\n}"
+            },
+            {
+              "name": "422 Invalid Transition",
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Tidak dapat mengubah status order dari 'shipped' ke 'cancelled'.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Process Order (PAID → PROCESSING)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Warehouse picked up the order\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/orders/{{order_id}}/process",
+              "host": ["{{base_url}}"],
+              "path": ["api", "orders", "{{order_id}}", "process"]
+            },
+            "description": "Manually advances a PAID order to PROCESSING.\n\n> **Note:** This also happens automatically via `ProcessPaidOrderListener` when a payment webhook succeeds."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Order transitioned to Processing.\",\n  \"data\": { \"id\": 1, \"status\": \"processing\", \"status_label\": \"Processing\" }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Ship Order (PROCESSING → SHIPPED)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tracking_number\": \"JNE-1234567890\",\n  \"reason\": \"Package handed to courier\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/orders/{{order_id}}/ship",
+              "host": ["{{base_url}}"],
+              "path": ["api", "orders", "{{order_id}}", "ship"]
+            },
+            "description": "Marks the order as shipped. Optionally records a `tracking_number` on the associated shipment record."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Order transitioned to Shipped.\",\n  \"data\": { \"id\": 1, \"status\": \"shipped\", \"status_label\": \"Shipped\" }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Complete Order (SHIPPED → COMPLETED)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Customer confirmed delivery\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/orders/{{order_id}}/complete",
+              "host": ["{{base_url}}"],
+              "path": ["api", "orders", "{{order_id}}", "complete"]
+            },
+            "description": "Marks the order as completed. This is a terminal state — no further transitions are possible."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Order transitioned to Completed.\",\n  \"data\": { \"id\": 1, \"status\": \"completed\", \"status_label\": \"Completed\" }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Payments",
+      "item": [
+        {
+          "name": "Initiate Payment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.success && json.data && json.data.external_reference) {",
+                  "    pm.collectionVariables.set('payment_ref', json.data.external_reference);",
+                  "    console.log('payment_ref set to', json.data.external_reference);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"provider\": \"mock_gateway\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/orders/{{order_id}}/pay",
+              "host": ["{{base_url}}"],
+              "path": ["api", "orders", "{{order_id}}", "pay"]
+            },
+            "description": "Initiates a payment for an order.\n\n- Automatically transitions the order from `created` → `pending_payment`.\n- Returns an `external_reference` and a `checkout_url` pointing to the mock checkout page.\n- **Idempotent:** calling this again while a PENDING payment already exists returns the same payment."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Payment request initiated successfully\",\n  \"data\": {\n    \"payment_id\": 1,\n    \"order_id\": 1,\n    \"order_number\": \"ORD-ABCD-20260910\",\n    \"provider\": \"mock_gateway\",\n    \"status\": \"pending\",\n    \"amount\": 10219.90,\n    \"external_reference\": \"PAY-ORD-ABCD-20260910-XYZ123\",\n    \"checkout_url\": \"http://localhost:8000/api/mock-checkout/PAY-ORD-ABCD-20260910-XYZ123\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Mock Checkout (preview)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/mock-checkout/{{payment_ref}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "mock-checkout", "{{payment_ref}}"]
+            },
+            "description": "Simulates the payment gateway checkout page.\n\nReturns the current payment status and ready-made webhook payloads (both success and failure) that you can copy-paste into the webhook requests below."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Mock checkout page. Use the webhook_example to simulate payment completion.\",\n  \"data\": {\n    \"external_reference\": \"PAY-ORD-ABCD-20260910-XYZ123\",\n    \"provider\": \"mock_gateway\",\n    \"status\": \"pending\",\n    \"amount\": 10219.90,\n    \"order_number\": \"ORD-ABCD-20260910\",\n    \"order_status\": \"pending_payment\"\n  },\n  \"webhook_example\": {\n    \"url\": \"http://localhost:8000/api/webhooks/payment\",\n    \"method\": \"POST\",\n    \"payload_success\": {\n      \"external_reference\": \"PAY-ORD-ABCD-20260910-XYZ123\",\n      \"status\": \"success\",\n      \"transaction_id\": \"TXN-ABCD1234\",\n      \"amount\": 10219.90\n    },\n    \"payload_failed\": {\n      \"external_reference\": \"PAY-ORD-ABCD-20260910-XYZ123\",\n      \"status\": \"failed\",\n      \"reason\": \"Insufficient funds\"\n    }\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Payment Webhook – Success",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_reference\": \"{{payment_ref}}\",\n  \"status\": \"success\",\n  \"transaction_id\": \"TXN-DEMO-001\",\n  \"amount\": 10219.90\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/webhooks/payment",
+              "host": ["{{base_url}}"],
+              "path": ["api", "webhooks", "payment"]
+            },
+            "description": "Simulates a successful payment callback from the gateway.\n\nThe webhook is processed asynchronously via `ProcessPaymentWebhookJob`. With `QUEUE_CONNECTION=sync` (default for local) the job runs immediately and the order is advanced: `pending_payment` → `paid` → `processing` (the listener auto-advances to processing).\n\n**Idempotent:** sending the same `external_reference` twice is a no-op after the first processing."
+          },
+          "response": [
+            {
+              "name": "200 OK – queued",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Webhook received and queued for asynchronous processing\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Payment Webhook – Failed",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"external_reference\": \"{{payment_ref}}\",\n  \"status\": \"failed\",\n  \"reason\": \"Insufficient funds in customer account\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/webhooks/payment",
+              "host": ["{{base_url}}"],
+              "path": ["api", "webhooks", "payment"]
+            },
+            "description": "Simulates a failed payment callback. Advances the order to `failed` (terminal state)."
+          },
+          "response": [
+            {
+              "name": "200 OK – queued",
+              "status": "OK",
+              "code": 200,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Webhook received and queued for asynchronous processing\"\n}"
+            },
+            {
+              "name": "422 Validation Error",
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"message\": \"The status field must be one of success, failed.\",\n  \"errors\": {\n    \"status\": [\"The status field must be one of success, failed.\"]\n  }\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
